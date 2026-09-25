@@ -1,8 +1,11 @@
 -- =============================================
--- IVORY HUB v13.9 - CENTUDOX + PREDICTION + TRACER
+-- IVORY HUB v14.1 - CENTUDOX + PREDICTION + TRACER
+-- Made by Ivory
+-- UI Refresh Edition
 -- =============================================
 
-print("🦷 Ivory Hub v13.9 loading...")
+print("🦷 Ivory Hub v14.1 loading...")
+print("Made by Ivory")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -41,6 +44,8 @@ local COLORS = {
     GREEN = Color3.fromRGB(50,255,50),
     YELLOW = Color3.fromRGB(255,200,0),
     ACCENT = Color3.fromRGB(255,50,50),
+    ACCENT_DIM = Color3.fromRGB(160,30,30),
+    ACCENT_GLOW = Color3.fromRGB(255,80,80),
 }
 
 local function Corner(o, r)
@@ -83,6 +88,9 @@ local function Text(parent, text, size, bold)
     return t
 end
 
+-- =============================================
+-- FEATURES TABLE (UNCHANGED)
+-- =============================================
 local Features = {
     SilentAim = false,
     SilentAimTarget = "Both",
@@ -392,9 +400,6 @@ end
 local NPC_FOLDERS = {"Enemies","Enemy","Monsters","Monster","Mobs","Mob","Bosses","Boss","NPCs","Npcs"}
 local CENTUDOX_FOLDERS = {"Enemies","Characters"}
 
--- =============================================
--- CENTUDOX-STYLE TARGET SCANNER
--- =============================================
 local function GetNearestTarget(targetType, mode, maxDist)
     local char = player.Character
     if not char then return nil, nil end
@@ -490,8 +495,8 @@ end
 -- =============================================
 -- CENTUDOX SILENT AIM + PREDICTION
 -- =============================================
-local TargetPos = nil       -- predicted position (used for namecall rewrite + tracer)
-local TargetRealPos = nil   -- real current position (for reference/debug)
+local TargetPos = nil
+local TargetRealPos = nil
 local TargetPart = nil
 local TargetHRP = nil
 local TargetModel = nil
@@ -517,17 +522,14 @@ RunService.RenderStepped:Connect(function()
 
         local pred = Features.SilentAimPrediction or 0
         if pred > 0 then
-            -- Use the exact part's velocity first (head/torso tracks better than HRP)
             local vel = part.AssemblyLinearVelocity
             if not vel or vel.Magnitude < 0.1 then
                 vel = hrp.AssemblyLinearVelocity
             end
             if vel then
-                -- Add ping/2 compensation for network latency
                 local pingComp = GetPing() * 0.5
                 local totalPred = pred + pingComp
                 local pos = part.Position + (vel * totalPred)
-                -- Small gravity compensation for arc'd projectiles
                 pos = pos + Vector3.new(0, 0.5 * (totalPred ^ 2) * workspace.Gravity * 0.1, 0)
                 TargetPos = pos
             else
@@ -541,7 +543,6 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- CentuDox-style namecall rewrite — now uses predicted TargetPos
 pcall(function()
     local mt = getrawmetatable(game)
     if not mt then return end
@@ -585,7 +586,7 @@ pcall(function()
 end)
 
 -- =============================================
--- TRACER — MOBILE SAFE (Beam + Part fallback)
+-- TRACER
 -- =============================================
 local TRACER_MAP = {
     Red    = Color3.fromRGB(255, 50, 50),
@@ -709,7 +710,7 @@ RunService.RenderStepped:Connect(function()
         if not originPart then hideTracer() return end
 
         local fromPos = originPart.Position
-        local toPos = TargetPos   -- tracer now leads with prediction
+        local toPos = TargetPos
         local thickness = Features.TracerThickness or 1.5
 
         if ensureBeamTracer() and BeamTracer and BeamAtt0 and BeamAtt1 then
@@ -733,7 +734,7 @@ player.CharacterAdded:Connect(function()
 end)
 
 -- =============================================
--- HITBOX (Players Only)
+-- HITBOX
 -- =============================================
 local HitboxOriginals = {}
 local HitboxBoxes = {}
@@ -1176,87 +1177,255 @@ MacroBtn.MouseButton1Click:Connect(function()
 end)
 
 -- =============================================
--- UI
+-- UI — REFRESHED LOOK
 -- =============================================
+
+-- Draggable Toggle Button (with glow)
 local ToggleBtn = Instance.new("TextButton")
-ToggleBtn.Size = UDim2.fromOffset(42,42)
-ToggleBtn.Position = UDim2.new(0, 15, 0.5, -21)
+ToggleBtn.Name = "IvoryToggle"
+ToggleBtn.Size = UDim2.fromOffset(46, 46)
+ToggleBtn.Position = UDim2.new(0, 15, 0.5, -23)
 ToggleBtn.BackgroundColor3 = COLORS.BLACK
-ToggleBtn.BorderColor3 = COLORS.ACCENT
-ToggleBtn.BorderSizePixel = 2
+ToggleBtn.BorderSizePixel = 0
 ToggleBtn.Text = "I"
 ToggleBtn.TextColor3 = COLORS.WHITE
-ToggleBtn.TextSize = 20
+ToggleBtn.TextSize = 22
 ToggleBtn.Font = Enum.Font.GothamBold
 ToggleBtn.AutoButtonColor = false
 ToggleBtn.Parent = Gui
-Corner(ToggleBtn, 10)
+Corner(ToggleBtn, 12)
+local toggleStroke = Stroke(ToggleBtn, COLORS.ACCENT, 2)
 
+-- Accent gradient inside the toggle button
+local toggleGrad = Instance.new("UIGradient")
+toggleGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(40, 0, 0)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0)),
+})
+toggleGrad.Rotation = 45
+toggleGrad.Parent = ToggleBtn
+
+-- Soft glow behind the toggle button
+local toggleGlow = Instance.new("ImageLabel")
+toggleGlow.Name = "ToggleGlow"
+toggleGlow.Size = UDim2.new(1, 30, 1, 30)
+toggleGlow.Position = UDim2.new(0, -15, 0, -15)
+toggleGlow.BackgroundTransparency = 1
+toggleGlow.Image = "rbxassetid://5028857084"
+toggleGlow.ImageColor3 = COLORS.ACCENT
+toggleGlow.ImageTransparency = 0.5
+toggleGlow.ZIndex = ToggleBtn.ZIndex - 1
+toggleGlow.Parent = ToggleBtn
+
+-- Pulse animation for the glow
+task.spawn(function()
+    while ToggleBtn and ToggleBtn.Parent do
+        TweenService:Create(toggleGlow, TweenInfo.new(1.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+            ImageTransparency = 0.15
+        }):Play()
+        task.wait(1.6)
+        TweenService:Create(toggleGlow, TweenInfo.new(1.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+            ImageTransparency = 0.6
+        }):Play()
+        task.wait(1.6)
+    end
+end)
+
+-- Toggle drag state
+local toggleDrag = {active=false, moved=false, startPos=nil, startMouse=nil, wasOpen=false}
+
+ToggleBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        toggleDrag.active = true
+        toggleDrag.moved = false
+        toggleDrag.startMouse = input.Position
+        toggleDrag.startPos = ToggleBtn.Position
+    end
+end)
+
+ToggleBtn.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        toggleDrag.active = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if not toggleDrag.active then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    local delta = input.Position - toggleDrag.startMouse
+    if delta.Magnitude > 6 then toggleDrag.moved = true end
+    ToggleBtn.Position = UDim2.new(
+        toggleDrag.startPos.X.Scale, toggleDrag.startPos.X.Offset + delta.X,
+        toggleDrag.startPos.Y.Scale, toggleDrag.startPos.Y.Offset + delta.Y)
+end)
+
+-- Main panel
 local Main = Instance.new("Frame")
+Main.Name = "IvoryMain"
 Main.Size = UDim2.new(0, 500, 0, 340)
 Main.Position = UDim2.new(0.5, -250, 0.5, -170)
 Main.BackgroundColor3 = COLORS.BLACK
 Main.BorderSizePixel = 0
 Main.Visible = false
+Main.ClipsDescendants = true
 Main.Parent = Gui
-Corner(Main, 14)
-Stroke(Main, COLORS.ACCENT, 1.5)
+Corner(Main, 16)
+local mainStroke = Stroke(Main, COLORS.ACCENT, 1.5)
 
+-- Panel gradient overlay
+local mainGrad = Instance.new("UIGradient")
+mainGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 0, 0)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(7, 7, 7)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(20, 0, 0)),
+})
+mainGrad.Rotation = 135
+mainGrad.Parent = Main
+
+-- Shadow frame behind Main
+local shadow = Instance.new("ImageLabel")
+shadow.Name = "Shadow"
+shadow.Size = UDim2.new(1, 60, 1, 60)
+shadow.Position = UDim2.new(0, -30, 0, -30)
+shadow.BackgroundTransparency = 1
+shadow.Image = "rbxassetid://5028857084"
+shadow.ImageColor3 = COLORS.ACCENT
+shadow.ImageTransparency = 0.65
+shadow.ZIndex = Main.ZIndex - 1
+shadow.Parent = Main
+
+-- Top bar
 local Top = Instance.new("Frame")
-Top.Size = UDim2.new(1, 0, 0, 44)
+Top.Size = UDim2.new(1, 0, 0, 48)
 Top.BackgroundColor3 = COLORS.DARK
 Top.BorderSizePixel = 0
 Top.Parent = Main
-Corner(Top, 14)
+Corner(Top, 16)
+
+local topGrad = Instance.new("UIGradient")
+topGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(35, 5, 5)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(13, 13, 13)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(13, 13, 13)),
+})
+topGrad.Rotation = 0
+topGrad.Parent = Top
+
+-- Top bottom-line (accent)
+local topLine = Instance.new("Frame")
+topLine.Size = UDim2.new(1, -24, 0, 1)
+topLine.Position = UDim2.new(0, 12, 1, -1)
+topLine.BackgroundColor3 = COLORS.ACCENT
+topLine.BackgroundTransparency = 0.6
+topLine.BorderSizePixel = 0
+topLine.Parent = Top
+
+-- Logo dot
+local logoDot = Instance.new("Frame")
+logoDot.Size = UDim2.fromOffset(8, 8)
+logoDot.Position = UDim2.new(0, 15, 0.5, -4)
+logoDot.BackgroundColor3 = COLORS.ACCENT
+logoDot.BorderSizePixel = 0
+logoDot.Parent = Top
+Corner(logoDot, 20)
+
+local logoDotGlow = Instance.new("ImageLabel")
+logoDotGlow.Size = UDim2.new(1, 20, 1, 20)
+logoDotGlow.Position = UDim2.new(0, -10, 0, -10)
+logoDotGlow.BackgroundTransparency = 1
+logoDotGlow.Image = "rbxassetid://5028857084"
+logoDotGlow.ImageColor3 = COLORS.ACCENT
+logoDotGlow.ImageTransparency = 0.3
+logoDotGlow.ZIndex = logoDot.ZIndex - 1
+logoDotGlow.Parent = logoDot
 
 local Title = Text(Top, "IVORY", 18, true)
-Title.Position = UDim2.new(0, 15, 0, 4)
+Title.Position = UDim2.new(0, 30, 0, 6)
 Title.Size = UDim2.new(0, 100, 0, 22)
 
 local SubTitle = Text(Top, "HUB", 9, false)
 SubTitle.TextColor3 = COLORS.ACCENT
-SubTitle.Position = UDim2.new(0, 16, 0, 26)
+SubTitle.Position = UDim2.new(0, 31, 0, 28)
 SubTitle.Size = UDim2.new(0, 60, 0, 12)
 
+-- Version badge
+local versionBadge = Instance.new("Frame")
+versionBadge.Size = UDim2.fromOffset(46, 16)
+versionBadge.Position = UDim2.new(0, 108, 0, 16)
+versionBadge.BackgroundColor3 = COLORS.DARKER
+versionBadge.BorderSizePixel = 0
+versionBadge.Parent = Top
+Corner(versionBadge, 20)
+Stroke(versionBadge, COLORS.ACCENT, 1)
+
+local versionLbl = Instance.new("TextLabel")
+versionLbl.BackgroundTransparency = 1
+versionLbl.Size = UDim2.new(1, 0, 1, 0)
+versionLbl.Text = "v14.1"
+versionLbl.TextColor3 = COLORS.ACCENT
+versionLbl.TextSize = 9
+versionLbl.Font = Enum.Font.GothamBold
+versionLbl.Parent = versionBadge
+
+-- Close button
 local Close = Instance.new("TextButton")
-Close.Size = UDim2.new(0, 26, 0, 26)
-Close.Position = UDim2.new(1, -32, 0.5, -13)
+Close.Size = UDim2.new(0, 28, 0, 28)
+Close.Position = UDim2.new(1, -36, 0.5, -14)
 Close.BackgroundColor3 = COLORS.DARKER
 Close.Text = "×"
 Close.TextColor3 = COLORS.WHITE
-Close.TextSize = 16
+Close.TextSize = 18
 Close.Font = Enum.Font.GothamBold
 Close.BorderSizePixel = 0
+Close.AutoButtonColor = false
 Close.Parent = Top
 Corner(Close, 8)
+Stroke(Close, Color3.fromRGB(50,50,50), 1)
+AttachClickAnim(Close)
+Close.MouseEnter:Connect(function() TweenIt(Close, {BackgroundColor3 = COLORS.ACCENT}) end)
+Close.MouseLeave:Connect(function() TweenIt(Close, {BackgroundColor3 = COLORS.DARKER}) end)
 
+-- Minimize button
 local Minimize = Instance.new("TextButton")
-Minimize.Size = UDim2.new(0, 26, 0, 26)
-Minimize.Position = UDim2.new(1, -62, 0.5, -13)
+Minimize.Size = UDim2.new(0, 28, 0, 28)
+Minimize.Position = UDim2.new(1, -70, 0.5, -14)
 Minimize.BackgroundColor3 = COLORS.DARKER
 Minimize.Text = "—"
 Minimize.TextColor3 = COLORS.WHITE
-Minimize.TextSize = 16
+Minimize.TextSize = 18
 Minimize.Font = Enum.Font.GothamBold
 Minimize.BorderSizePixel = 0
+Minimize.AutoButtonColor = false
 Minimize.Parent = Top
 Corner(Minimize, 8)
+Stroke(Minimize, Color3.fromRGB(50,50,50), 1)
+AttachClickAnim(Minimize)
+Minimize.MouseEnter:Connect(function() TweenIt(Minimize, {BackgroundColor3 = COLORS.ACCENT}) end)
+Minimize.MouseLeave:Connect(function() TweenIt(Minimize, {BackgroundColor3 = COLORS.DARKER}) end)
 
+-- Toggle button click behavior (only fires if not dragged)
 ToggleBtn.MouseButton1Click:Connect(function()
+    if toggleDrag.moved then return end
     Main.Visible = not Main.Visible
-    TweenIt(ToggleBtn, Main.Visible and
-        {BackgroundColor3 = COLORS.ACCENT, TextColor3 = COLORS.BLACK} or
-        {BackgroundColor3 = COLORS.BLACK, TextColor3 = COLORS.WHITE})
+    if Main.Visible then
+        Main.Size = UDim2.new(0, 0, 0, 0)
+        TweenIt(Main, {Size = UDim2.new(0, 500, 0, 340)}, 0.28)
+        TweenIt(ToggleBtn, {BackgroundColor3 = COLORS.ACCENT, TextColor3 = COLORS.BLACK})
+    else
+        TweenIt(ToggleBtn, {BackgroundColor3 = COLORS.BLACK, TextColor3 = COLORS.WHITE})
+    end
 end)
 
+-- Sidebar
 local Sidebar = Instance.new("Frame")
-Sidebar.Size = UDim2.new(0, 95, 1, -54)
-Sidebar.Position = UDim2.new(0, 8, 0, 50)
+Sidebar.Size = UDim2.new(0, 95, 1, -58)
+Sidebar.Position = UDim2.new(0, 8, 0, 54)
 Sidebar.BackgroundColor3 = COLORS.DARK
+Sidebar.BackgroundTransparency = 0.15
 Sidebar.BorderSizePixel = 0
 Sidebar.Parent = Main
 Corner(Sidebar, 12)
-Stroke(Sidebar)
+Stroke(Sidebar, Color3.fromRGB(35,35,35), 1)
 
 local TabLayout = Instance.new("UIListLayout")
 TabLayout.Padding = UDim.new(0, 3)
@@ -1269,14 +1438,16 @@ Pad.PaddingLeft = UDim.new(0, 4)
 Pad.PaddingRight = UDim.new(0, 4)
 Pad.Parent = Sidebar
 
+-- Content area
 local Content = Instance.new("Frame")
-Content.Size = UDim2.new(1, -111, 1, -54)
-Content.Position = UDim2.new(0, 103, 0, 50)
+Content.Size = UDim2.new(1, -111, 1, -58)
+Content.Position = UDim2.new(0, 103, 0, 54)
 Content.BackgroundColor3 = COLORS.DARK
+Content.BackgroundTransparency = 0.15
 Content.BorderSizePixel = 0
 Content.Parent = Main
 Corner(Content, 12)
-Stroke(Content)
+Stroke(Content, Color3.fromRGB(35,35,35), 1)
 
 local Pages = {}
 local function CreatePage(name)
@@ -1302,11 +1473,33 @@ local function CreatePage(name)
     return page
 end
 
+-- Section header (with accent divider line)
 local function Section(parent, text)
-    local l = Text(parent, text, 8, true)
+    local wrap = Instance.new("Frame")
+    wrap.Size = UDim2.new(1, 0, 0, 20)
+    wrap.BackgroundTransparency = 1
+    wrap.Parent = parent
+
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = text
     l.TextColor3 = COLORS.ACCENT
-    l.Size = UDim2.new(1, 0, 0, 14)
-    return l
+    l.TextSize = 9
+    l.Font = Enum.Font.GothamBold
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Size = UDim2.new(1, 0, 0, 12)
+    l.Position = UDim2.new(0, 0, 0, 0)
+    l.Parent = wrap
+
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(1, 0, 0, 1)
+    line.Position = UDim2.new(0, 0, 0, 16)
+    line.BackgroundColor3 = COLORS.ACCENT
+    line.BackgroundTransparency = 0.7
+    line.BorderSizePixel = 0
+    line.Parent = wrap
+
+    return wrap
 end
 
 local function Button(parent, text, cb)
@@ -1321,8 +1514,16 @@ local function Button(parent, text, cb)
     b.AutoButtonColor = false
     b.Parent = parent
     Corner(b, 8)
-    Stroke(b, Color3.fromRGB(35,35,35), 1)
+    local st = Stroke(b, Color3.fromRGB(35,35,35), 1)
     AttachClickAnim(b)
+    b.MouseEnter:Connect(function()
+        TweenIt(b, {BackgroundColor3 = Color3.fromRGB(32,32,32)})
+        TweenIt(st, {Color = COLORS.ACCENT_DIM})
+    end)
+    b.MouseLeave:Connect(function()
+        TweenIt(b, {BackgroundColor3 = COLORS.CARD})
+        TweenIt(st, {Color = Color3.fromRGB(35,35,35)})
+    end)
     b.MouseButton1Click:Connect(cb)
     return b
 end
@@ -1341,8 +1542,16 @@ local function CycleButton(parent, text, options, default, cb)
     b.AutoButtonColor = false
     b.Parent = parent
     Corner(b, 8)
-    Stroke(b, Color3.fromRGB(35,35,35), 1)
+    local st = Stroke(b, Color3.fromRGB(35,35,35), 1)
     AttachClickAnim(b)
+    b.MouseEnter:Connect(function()
+        TweenIt(b, {BackgroundColor3 = Color3.fromRGB(32,32,32)})
+        TweenIt(st, {Color = COLORS.ACCENT_DIM})
+    end)
+    b.MouseLeave:Connect(function()
+        TweenIt(b, {BackgroundColor3 = COLORS.CARD})
+        TweenIt(st, {Color = Color3.fromRGB(35,35,35)})
+    end)
     b.MouseButton1Click:Connect(function()
         idx = idx % #options + 1
         b.Text = text .. ": " .. options[idx]
@@ -1364,16 +1573,16 @@ local function Toggle(parent, text, default, cb)
     lbl.Position = UDim2.new(0, 10, 0, 0)
     lbl.Size = UDim2.new(1, -50, 1, 0)
     local sw = Instance.new("TextButton")
-    sw.Size = UDim2.new(0, 26, 0, 14)
-    sw.Position = UDim2.new(1, -34, 0.5, -7)
+    sw.Size = UDim2.new(0, 28, 0, 15)
+    sw.Position = UDim2.new(1, -36, 0.5, -7.5)
     sw.BackgroundColor3 = Color3.fromRGB(35,35,35)
     sw.Text = ""
     sw.BorderSizePixel = 0
     sw.Parent = h
     Corner(sw, 20)
     local ball = Instance.new("Frame")
-    ball.Size = UDim2.new(0, 10, 0, 10)
-    ball.Position = UDim2.new(0, 2, 0.5, -5)
+    ball.Size = UDim2.new(0, 11, 0, 11)
+    ball.Position = UDim2.new(0, 2, 0.5, -5.5)
     ball.BackgroundColor3 = COLORS.GRAY
     ball.BorderSizePixel = 0
     ball.Parent = sw
@@ -1381,12 +1590,14 @@ local function Toggle(parent, text, default, cb)
     local function Update()
         if state then
             TweenIt(sw, {BackgroundColor3 = COLORS.ACCENT})
-            TweenIt(ball, {Position = UDim2.new(1, -12, 0.5, -5), BackgroundColor3 = COLORS.WHITE})
+            TweenIt(ball, {Position = UDim2.new(1, -13, 0.5, -5.5), BackgroundColor3 = COLORS.WHITE})
             lbl.Text = text .. ": ON"
+            lbl.TextColor3 = COLORS.WHITE
         else
             TweenIt(sw, {BackgroundColor3 = Color3.fromRGB(35,35,35)})
-            TweenIt(ball, {Position = UDim2.new(0, 2, 0.5, -5), BackgroundColor3 = COLORS.GRAY})
+            TweenIt(ball, {Position = UDim2.new(0, 2, 0.5, -5.5), BackgroundColor3 = COLORS.GRAY})
             lbl.Text = text .. ": OFF"
+            lbl.TextColor3 = COLORS.WHITE
         end
         if cb then cb(state) end
     end
@@ -1412,10 +1623,9 @@ end)
 local function Slider(parent, text, default, minVal, maxVal, cb, suffix)
     local Value = default or 50
     local h = Instance.new("Frame")
-    h.Size = UDim2.new(1, 0, 0, 38)
+    h.Size = UDim2.new(1, 0, 0, 40)
     h.BackgroundColor3 = COLORS.CARD
-    h.BorderSizePixel = 0
-    h.Parent = parent
+    h.BorderSizePixel = 0    h.Parent = parent
     Corner(h, 8)
     Stroke(h, Color3.fromRGB(35,35,35), 1)
     local lbl = Text(h, text .. ": " .. tostring(Value) .. (suffix or ""), 10, false)
@@ -1427,8 +1637,8 @@ local function Slider(parent, text, default, minVal, maxVal, cb, suffix)
     barHolder.BackgroundTransparency = 1
     barHolder.Parent = h
     local bg = Instance.new("Frame")
-    bg.Size = UDim2.new(1, 0, 0, 4)
-    bg.Position = UDim2.new(0, 0, 0.5, -2)
+    bg.Size = UDim2.new(1, 0, 0, 5)
+    bg.Position = UDim2.new(0, 0, 0.5, -2.5)
     bg.BackgroundColor3 = Color3.fromRGB(45,45,45)
     bg.BorderSizePixel = 0
     bg.Parent = barHolder
@@ -1439,21 +1649,36 @@ local function Slider(parent, text, default, minVal, maxVal, cb, suffix)
     fill.BorderSizePixel = 0
     fill.Parent = bg
     Corner(fill, 4)
+    local fillGrad = Instance.new("UIGradient")
+    fillGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, COLORS.ACCENT_DIM),
+        ColorSequenceKeypoint.new(1, COLORS.ACCENT_GLOW),
+    })
+    fillGrad.Parent = fill
     local knob = Instance.new("TextButton")
-    knob.Size = UDim2.new(0, 18, 0, 18)
-    knob.Position = UDim2.new((Value - minVal) / (maxVal - minVal), -9, 0.5, -9)
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = UDim2.new((Value - minVal) / (maxVal - minVal), -8, 0.5, -8)
     knob.BackgroundColor3 = COLORS.WHITE
     knob.Text = ""
     knob.BorderSizePixel = 0
     knob.Parent = bg
     Corner(knob, 20)
     Stroke(knob, COLORS.ACCENT, 2)
+    local knobGlow = Instance.new("ImageLabel")
+    knobGlow.Size = UDim2.new(1, 16, 1, 16)
+    knobGlow.Position = UDim2.new(0, -8, 0, -8)
+    knobGlow.BackgroundTransparency = 1
+    knobGlow.Image = "rbxassetid://5028857084"
+    knobGlow.ImageColor3 = COLORS.ACCENT
+    knobGlow.ImageTransparency = 0.5
+    knobGlow.ZIndex = knob.ZIndex - 1
+    knobGlow.Parent = knob
     local function UpdateSlider(v)
         local cv = math.clamp(v, minVal, maxVal)
         Value = cv
         local r = (cv - minVal) / (maxVal - minVal)
         fill.Size = UDim2.new(r, 0, 1, 0)
-        knob.Position = UDim2.new(r, -9, 0.5, -9)
+        knob.Position = UDim2.new(r, -8, 0.5, -8)
         lbl.Text = text .. ": " .. tostring(math.floor(cv * 100) / 100) .. (suffix or "")
         if cb then cb(cv) end
     end
@@ -1488,7 +1713,7 @@ local SocialsPage = CreatePage("Socials")
 local AboutPage = CreatePage("About")
 
 Section(MainPage, "IVORY HUB")
-local mtL = Text(MainPage, "IVORY HUB v13.9", 16, true)
+local mtL = Text(MainPage, "IVORY HUB v14.1", 17, true)
 mtL.Size = UDim2.new(1, 0, 0, 24)
 mtL.TextXAlignment = Enum.TextXAlignment.Center
 mtL.TextColor3 = COLORS.WHITE
@@ -1499,10 +1724,21 @@ msub.Position = UDim2.new(0, 0, 0, 26)
 msub.TextXAlignment = Enum.TextXAlignment.Center
 msub.TextColor3 = COLORS.GRAY
 
+-- "Made by Ivory" signature
+local sigFrame = Instance.new("Frame")
+sigFrame.Size = UDim2.new(1, 0, 0, 20)
+sigFrame.BackgroundTransparency = 1
+sigFrame.Parent = MainPage
+
+local mby = Text(sigFrame, "✦ Made by Ivory ✦", 11, true)
+mby.Size = UDim2.new(1, 0, 1, 0)
+mby.TextXAlignment = Enum.TextXAlignment.Center
+mby.TextColor3 = COLORS.ACCENT
+
 Section(MainPage, "STATUS")
 local statusLbl = Text(MainPage, "Active: None", 10, false)
 statusLbl.Size = UDim2.new(1, -10, 0, 16)
-statusLbl.Position = UDim2.new(0, 5, 0, 60)
+statusLbl.Position = UDim2.new(0, 5, 0, 0)
 statusLbl.TextColor3 = COLORS.GREEN
 
 task.spawn(function()
@@ -1528,9 +1764,6 @@ task.spawn(function()
     end
 end)
 
--- =============================================
--- COMBAT TAB (Prediction slider is back!)
--- =============================================
 Section(CombatPage, "SILENT AIM")
 Toggle(CombatPage, "Enable Silent Aim", Features.SilentAim, function(s) Features.SilentAim = s SaveConfig() end)
 CycleButton(CombatPage, "Target", {"Both","Players","NPCs"}, Features.SilentAimTarget, function(v) Features.SilentAimTarget = v SaveConfig() end)
@@ -1821,7 +2054,7 @@ Button(ConfigPage, "Unload UI", function()
 end)
 
 Section(SocialsPage, "⭐ JOIN US ⭐")
-local socialTitle = Text(SocialsPage, "Ivory & Rayo's Discord", 12, true)
+local socialTitle = Text(SocialsPage, "Ivory Hub Discord", 13, true)
 socialTitle.Size = UDim2.new(1, 0, 0, 20)
 socialTitle.Position = UDim2.new(0, 0, 0, 26)
 socialTitle.TextXAlignment = Enum.TextXAlignment.Center
@@ -1847,11 +2080,11 @@ local function socialCard(name, discord, y)
 end
 
 socialCard("IVORY", "Ivory999", 55)
-socialCard("RAYO", "Rayo06996", 125)
 
 Section(AboutPage, "📖 ABOUT IVORY HUB")
 local aboutLines = {
-    "Ivory Hub v13.9",
+    "Ivory Hub v14.1",
+    "Made by Ivory",
     "",
     "• CentuDox Silent Aim + Prediction",
     "• Tracer that leads with prediction",
@@ -1865,7 +2098,7 @@ for i, line in ipairs(aboutLines) do
     local lbl = Text(AboutPage, line, 9, false)
     lbl.Size = UDim2.new(1, -10, 0, 14)
     lbl.Position = UDim2.new(0, 5, 0, 26 + (i-1)*15)
-    lbl.TextColor3 = COLORS.WHITE
+    lbl.TextColor3 = (i == 2) and COLORS.ACCENT or COLORS.WHITE
     lbl.TextXAlignment = Enum.TextXAlignment.Left
 end
 
@@ -1881,6 +2114,16 @@ local Tabs = {
     {name="ABOUT", icon="📖", page=AboutPage},
 }
 
+-- Sliding tab indicator
+local indicator = Instance.new("Frame")
+indicator.Size = UDim2.new(0, 3, 0, 20)
+indicator.Position = UDim2.new(0, 1, 0, 0)
+indicator.BackgroundColor3 = COLORS.ACCENT
+indicator.BorderSizePixel = 0
+indicator.ZIndex = 5
+indicator.Parent = Sidebar
+Corner(indicator, 4)
+
 local function SelectTab(button, page)
     for _, d in ipairs(Tabs) do
         if d.button then
@@ -1892,6 +2135,8 @@ local function SelectTab(button, page)
     TweenIt(button, {BackgroundColor3 = COLORS.ACCENT}, 0.2)
     button.TextColor3 = COLORS.WHITE
     page.Visible = true
+    -- Move indicator
+    TweenIt(indicator, {Position = UDim2.new(0, 1, 0, button.AbsolutePosition.Y - Sidebar.AbsolutePosition.Y)}, 0.18)
 end
 
 for _, d in ipairs(Tabs) do
@@ -1899,7 +2144,7 @@ for _, d in ipairs(Tabs) do
     btn.Size = UDim2.new(1, 0, 0, 26)
     btn.BackgroundColor3 = COLORS.DARKER
     btn.BorderSizePixel = 0
-    btn.Text = "  " .. d.icon .. " " .. d.name
+    btn.Text = "  " .. d.icon .. "  " .. d.name
     btn.TextColor3 = COLORS.GRAY
     btn.TextSize = 9
     btn.Font = Enum.Font.GothamBold
@@ -1910,10 +2155,19 @@ for _, d in ipairs(Tabs) do
     Stroke(btn, Color3.fromRGB(35,35,35), 1)
     AttachClickAnim(btn)
     d.button = btn
+    btn.MouseEnter:Connect(function()
+        if d.page.Visible then return end
+        TweenIt(btn, {BackgroundColor3 = Color3.fromRGB(30,30,30)})
+    end)
+    btn.MouseLeave:Connect(function()
+        if d.page.Visible then return end
+        TweenIt(btn, {BackgroundColor3 = COLORS.DARKER})
+    end)
     btn.MouseButton1Click:Connect(function() SelectTab(btn, d.page) end)
 end
 SelectTab(Tabs[1].button, Tabs[1].page)
 
+-- Dragging the main window
 local Drag, DStart, SPos = false, nil, nil
 Top.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -1936,13 +2190,15 @@ Minimize.MouseButton1Click:Connect(function()
     if Min then
         Sidebar.Visible = false
         Content.Visible = false
-        TweenIt(Main, {Size = UDim2.new(0, 500, 0, 44)})
+        shadow.Visible = false
+        TweenIt(Main, {Size = UDim2.new(0, 500, 0, 48)})
         Minimize.Text = "+"
     else
         TweenIt(Main, {Size = UDim2.new(0, 500, 0, 340)})
         task.wait(.15)
         Sidebar.Visible = true
         Content.Visible = true
+        shadow.Visible = true
         Minimize.Text = "—"
     end
 end)
@@ -1960,8 +2216,9 @@ Close.MouseButton1Click:Connect(function()
 end)
 
 print("========================================")
-print("     IVORY HUB v13.9 LOADED")
+print("     IVORY HUB v14.1 LOADED")
+print("     Made by Ivory")
 print("========================================")
-print("Silent Aim: CentuDox + Prediction")
-print("Tracer: Leads with prediction")
+print("Draggable Toggle: grab & move 'I'")
+print("UI Refresh Edition")
 print("========================================")
