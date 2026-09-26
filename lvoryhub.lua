@@ -2222,3 +2222,1353 @@ print("========================================")
 print("Draggable Toggle: grab & move 'I'")
 print("UI Refresh Edition")
 print("========================================")
+-- =============================================
+-- IVORY HUB — SMART MACRO (ported from Cokeboys)
+-- PART 1 / 5 : STATE + SLOT SCHEMA + SAVE/LOAD
+-- =============================================
+
+-- Toggle: don't touch Ivory's old macro yet
+local IVORY_MACRO = {}
+_G.IvoryMacro = IVORY_MACRO
+
+IVORY_MACRO.BLOCK_COUNT = 8      -- you wanted 8 blocks per slot
+IVORY_MACRO.SLOT_COUNT  = 5      -- 5 slots like Cokeboys
+IVORY_MACRO.WEAPONS     = {"Melee", "Fruit", "Sword", "Gun"}
+IVORY_MACRO.SKILLS      = {"Z", "X", "C", "V", "F"}
+IVORY_MACRO.CAST_MODES  = {"Tap", "Hold", "Transform"}
+
+-- Runtime state
+IVORY_MACRO.slots           = {}     -- the 5 slots
+IVORY_MACRO.activeSlot      = 1
+IVORY_MACRO.running         = false
+IVORY_MACRO.handoffActive   = false
+IVORY_MACRO.runContext      = nil
+IVORY_MACRO.runToken        = 0
+IVORY_MACRO.pendingRun      = nil
+IVORY_MACRO.intentVersion   = 0
+IVORY_MACRO.currentBlockIndex = nil
+
+-- Cooldown / ready caches (used in Part 2)
+IVORY_MACRO.smartCooldownCache = {}
+IVORY_MACRO.smartReadyCache    = {}
+
+-- Thread context table (used so macro can be cancelled mid-run)
+IVORY_MACRO.contextByThread = setmetatable({}, {__mode = "k"})
+function IVORY_MACRO.getThreadContext()
+    return IVORY_MACRO.contextByThread[coroutine.running()]
+end
+function IVORY_MACRO.contextAlive(ctx)
+    return not ctx or
+           (IVORY_MACRO.runContext == ctx and
+            not ctx.cancelled and
+            IVORY_MACRO.runToken == ctx.id)
+end
+
+-- =============================================
+-- SLOT SCHEMA
+-- Each slot = {
+--   name = "Slot 1",
+--   soruEnabled = false, soruAfter = 1,
+--   m1Enabled   = false, m1Weapon = "Melee", m1Count = 1, m1After = 1,
+--   v3Enabled   = false, v3After = 1,
+--   steps = { [1..8] = { enabled, weapon, skill, mode, hold,
+--                        fallbackEnabled, fallbackWeapon, fallbackSkill,
+--                        fallbackMode, fallbackHold, jumpsAfter } }
+-- }
+-- =============================================
+
+local function newEmptyStep()
+    return {
+        enabled          = false,
+        weapon           = "Melee",
+        skill            = "Z",
+        mode             = "Tap",     -- Tap | Hold | Transform
+        hold             = "0",       -- seconds (string, like Cokeboys)
+        delay            = "0.2",     -- unused for now, kept for schema compat
+        fallbackEnabled  = false,
+        fallbackWeapon   = "Melee",
+        fallbackSkill    = "X",
+        fallbackMode     = "Tap",
+        fallbackHold     = "0",
+        jumpsAfter       = 0,
+    }
+end
+
+local function newEmptySlot(index)
+    local slot = {
+        name         = "Slot " .. index,
+        soruEnabled  = false,
+        soruAfter    = 1,
+        m1Enabled    = false,
+        m1Weapon     = "Melee",
+        m1Count      = 1,
+        m1After      = 1,
+        v3Enabled    = false,
+        v3After      = 1,
+        steps        = {},
+    }
+    for i = 1, IVORY_MACRO.BLOCK_COUNT do
+        slot.steps[i] = newEmptyStep()
+    end
+    return slot
+end
+IVORY_MACRO.newEmptySlot = newEmptySlot
+IVORY_MACRO.newEmptyStep = newEmptyStep
+
+-- =============================================
+-- NORMALIZE HELPERS (keep values sane after load)
+-- =============================================
+
+function IVORY_MACRO.normalizeWeapon(w)
+    if type(w) ~= "string" then return "Melee" end
+    local lower = w:lower():gsub("%s+", "")
+    if lower == "none"     then return "None"  end
+    if lower == "melee"    then return "Melee" end
+    if lower == "fruit"    or lower == "bloxfruit" then return "Fruit" end
+    if lower == "sword"    then return "Sword" end
+    if lower == "gun"      then return "Gun"   end
+    return "Melee"
+end
+
+function IVORY_MACRO.normalizeSkill(s)
+    s = tostring(s or "Z"):upper():match("%S+") or "Z"
+    if not s:match("^[ZXCVF]$") then return "Z" end
+    return s
+end
+
+function IVORY_MACRO.normalizeCastMode(mode, hold)
+    local m = tostring(mode or ""):lower()
+    if m == "transform" then return "Transform" end
+    if m == "hold" or (m == "" and (tonumber(hold) or 0) > 0) then return "Hold" end
+    return "Tap"
+end
+
+function IVORY_MACRO.clampInt(n, min, max, default)
+    n = tonumber(n) or default
+    n = math.floor(n)
+    if n < min then n = min end
+    if n > max then n = max end
+    return n
+end
+
+-- =============================================
+-- NORMALIZE A WHOLE SLOT (after load / user edit)
+-- =============================================
+
+function IVORY_MACRO.normalizeSlot(slot)
+    if type(slot) ~= "table" then return newEmptySlot(1) end
+    slot.name        = tostring(slot.name or "Slot"):sub(1, 28)
+    slot.soruEnabled = slot.soruEnabled == true
+    slot.soruAfter   = IVORY_MACRO.clampInt(slot.soruAfter, 0, IVORY_MACRO.BLOCK_COUNT, 1)
+    slot.m1Enabled   = slot.m1Enabled == true
+    slot.m1Weapon    = IVORY_MACRO.normalizeWeapon(slot.m1Weapon)
+    if slot.m1Weapon == "None" then slot.m1Weapon = "Melee" end
+    slot.m1Count     = IVORY_MACRO.clampInt(slot.m1Count, 1, 6, 1)
+    slot.m1After     = IVORY_MACRO.clampInt(slot.m1After, 0, IVORY_MACRO.BLOCK_COUNT, 1)
+    slot.v3Enabled   = slot.v3Enabled == true
+    slot.v3After     = IVORY_MACRO.clampInt(slot.v3After, 0, IVORY_MACRO.BLOCK_COUNT, 1)
+
+    if type(slot.steps) ~= "table" then slot.steps = {} end
+    for i = 1, IVORY_MACRO.BLOCK_COUNT do
+        local s = slot.steps[i] or slot.steps[tostring(i)]
+        if type(s) ~= "table" then
+            slot.steps[i] = newEmptyStep()
+        else
+            s.enabled         = s.enabled == true
+            s.weapon          = IVORY_MACRO.normalizeWeapon(s.weapon)
+            s.skill           = IVORY_MACRO.normalizeSkill(s.skill)
+            s.mode            = IVORY_MACRO.normalizeCastMode(s.mode, s.hold)
+            s.hold            = tostring(math.clamp(tonumber(s.hold) or 0, 0, 10))
+            s.delay           = tostring(math.clamp(tonumber(s.delay) or 0.2, 0, 10))
+            s.fallbackEnabled = s.fallbackEnabled == true
+            s.fallbackWeapon  = IVORY_MACRO.normalizeWeapon(s.fallbackWeapon or s.weapon)
+            s.fallbackSkill   = IVORY_MACRO.normalizeSkill(s.fallbackSkill or (s.skill == "X" and "C" or "X"))
+            s.fallbackMode    = IVORY_MACRO.normalizeCastMode(s.fallbackMode, s.fallbackHold)
+            s.fallbackHold    = tostring(math.clamp(tonumber(s.fallbackHold) or 0, 0, 10))
+            s.jumpsAfter      = IVORY_MACRO.clampInt(s.jumpsAfter, 0, 8, 0)
+            slot.steps[i] = s
+        end
+    end
+end
+
+-- =============================================
+-- BUILD DEFAULT 5 SLOTS
+-- =============================================
+
+function IVORY_MACRO.resetAllSlots()
+    IVORY_MACRO.slots = {}
+    for i = 1, IVORY_MACRO.SLOT_COUNT do
+        IVORY_MACRO.slots[i] = newEmptySlot(i)
+    end
+    IVORY_MACRO.activeSlot = 1
+end
+
+IVORY_MACRO.resetAllSlots()
+
+-- =============================================
+-- SAVE / LOAD  (uses Ivory's existing save system)
+-- Ivory already has: Features table + writefile/readfile config
+-- We piggyback on a separate file so we don't break Ivory's format
+-- =============================================
+
+local MACRO_FOLDER = "IvoryHub"
+local MACRO_FILE   = MACRO_FOLDER .. "/smart_macro.txt"
+
+-- Serialize one slot to a compact string format
+local function serializeSlot(slot)
+    local parts = {}
+    parts[#parts + 1] = "name=" .. slot.name
+    parts[#parts + 1] = "soruEnabled=" .. tostring(slot.soruEnabled)
+    parts[#parts + 1] = "soruAfter=" .. tostring(slot.soruAfter)
+    parts[#parts + 1] = "m1Enabled=" .. tostring(slot.m1Enabled)
+    parts[#parts + 1] = "m1Weapon=" .. slot.m1Weapon
+    parts[#parts + 1] = "m1Count=" .. tostring(slot.m1Count)
+    parts[#parts + 1] = "m1After=" .. tostring(slot.m1After)
+    parts[#parts + 1] = "v3Enabled=" .. tostring(slot.v3Enabled)
+    parts[#parts + 1] = "v3After=" .. tostring(slot.v3After)
+    for i = 1, IVORY_MACRO.BLOCK_COUNT do
+        local s = slot.steps[i]
+        local prefix = "step" .. i .. "."
+        parts[#parts + 1] = prefix .. "enabled=" .. tostring(s.enabled)
+        parts[#parts + 1] = prefix .. "weapon=" .. s.weapon
+        parts[#parts + 1] = prefix .. "skill=" .. s.skill
+        parts[#parts + 1] = prefix .. "mode=" .. s.mode
+        parts[#parts + 1] = prefix .. "hold=" .. s.hold
+        parts[#parts + 1] = prefix .. "delay=" .. s.delay
+        parts[#parts + 1] = prefix .. "fbEnabled=" .. tostring(s.fallbackEnabled)
+        parts[#parts + 1] = prefix .. "fbWeapon=" .. s.fallbackWeapon
+        parts[#parts + 1] = prefix .. "fbSkill=" .. s.fallbackSkill
+        parts[#parts + 1] = prefix .. "fbMode=" .. s.fallbackMode
+        parts[#parts + 1] = prefix .. "fbHold=" .. s.fallbackHold
+        parts[#parts + 1] = prefix .. "jumps=" .. tostring(s.jumpsAfter)
+    end
+    return table.concat(parts, "\n")
+end
+
+-- Deserialize one slot from string lines
+local function deserializeSlot(text)
+    local slot = newEmptySlot(1)
+    for line in text:gmatch("[^\r\n]+") do
+        local key, val = line:match("^([^=]+)=(.*)$")
+        if key and val then
+            if key == "name" then slot.name = val
+            elseif key == "soruEnabled" then slot.soruEnabled = (val == "true")
+            elseif key == "soruAfter" then slot.soruAfter = tonumber(val) or 1
+            elseif key == "m1Enabled" then slot.m1Enabled = (val == "true")
+            elseif key == "m1Weapon" then slot.m1Weapon = val
+            elseif key == "m1Count" then slot.m1Count = tonumber(val) or 1
+            elseif key == "m1After" then slot.m1After = tonumber(val) or 1
+            elseif key == "v3Enabled" then slot.v3Enabled = (val == "true")
+            elseif key == "v3After" then slot.v3After = tonumber(val) or 1
+            else
+                local stepIdx, field = key:match("^step(%d+)%.(.+)$")
+                stepIdx = tonumber(stepIdx)
+                if stepIdx and field and stepIdx >= 1 and stepIdx <= IVORY_MACRO.BLOCK_COUNT then
+                    local s = slot.steps[stepIdx]
+                    if field == "enabled" then s.enabled = (val == "true")
+                    elseif field == "weapon" then s.weapon = val
+                    elseif field == "skill" then s.skill = val
+                    elseif field == "mode" then s.mode = val
+                    elseif field == "hold" then s.hold = val
+                    elseif field == "delay" then s.delay = val
+                    elseif field == "fbEnabled" then s.fallbackEnabled = (val == "true")
+                    elseif field == "fbWeapon" then s.fallbackWeapon = val
+                    elseif field == "fbSkill" then s.fallbackSkill = val
+                    elseif field == "fbMode" then s.fallbackMode = val
+                    elseif field == "fbHold" then s.fallbackHold = val
+                    elseif field == "jumps" then s.jumpsAfter = tonumber(val) or 0
+                    end
+                end
+            end
+        end
+    end
+    return slot
+end
+
+function IVORY_MACRO.Save()
+    if not writefile then return false end
+    pcall(function()
+        if isfolder and makefolder and not isfolder(MACRO_FOLDER) then
+            makefolder(MACRO_FOLDER)
+        end
+        local buf = {}
+        buf[#buf + 1] = "activeSlot=" .. tostring(IVORY_MACRO.activeSlot)
+        for i = 1, IVORY_MACRO.SLOT_COUNT do
+            buf[#buf + 1] = "===SLOT " .. i .. "==="
+            buf[#buf + 1] = serializeSlot(IVORY_MACRO.slots[i])
+        end
+        writefile(MACRO_FILE, table.concat(buf, "\n"))
+    end)
+    return true
+end
+
+function IVORY_MACRO.Load()
+    if not readfile or not isfile then return false end
+    if not isfile(MACRO_FILE) then return false end
+    local ok, content = pcall(readfile, MACRO_FILE)
+    if not ok or type(content) ~= "string" then return false end
+
+    local slotBuf, currentSlot, activeSlot = {}, nil, 1
+    local function flush()
+        if currentSlot and slotBuf[currentSlot] then
+            IVORY_MACRO.slots[currentSlot] = deserializeSlot(table.concat(slotBuf[currentSlot], "\n"))
+            IVORY_MACRO.normalizeSlot(IVORY_MACRO.slots[currentSlot])
+        end
+    end
+
+    for line in content:gmatch("[^\r\n]+") do
+        local n = tonumber(line:match("^activeSlot=(%d+)$"))
+        if n then
+            activeSlot = n
+        else
+            local idx = tonumber(line:match("^===SLOT (%d+)===$"))
+            if idx then
+                if currentSlot then flush() end
+                currentSlot = idx
+                slotBuf[idx] = {}
+            elseif currentSlot then
+                table.insert(slotBuf[currentSlot], line)
+            end
+        end
+    end
+    flush()
+
+    IVORY_MACRO.activeSlot = math.clamp(activeSlot, 1, IVORY_MACRO.SLOT_COUNT)
+    return true
+end
+
+-- Auto-load on script start
+IVORY_MACRO.Load()
+
+print("[IvoryHub] Smart Macro Part 1 loaded - " ..
+      IVORY_MACRO.SLOT_COUNT .. " slots x " ..
+      IVORY_MACRO.BLOCK_COUNT .. " blocks")
+-- =============================================
+-- IVORY HUB — SMART MACRO
+-- PART 2 / 5 : EQUIP + COOLDOWN + MOBILE DISPATCH
+-- =============================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local VIM = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- =============================================
+-- TOOL -> WEAPON TYPE  (matches Cokeboys logic)
+-- =============================================
+
+function IVORY_MACRO.toolToWeaponType(tool)
+    if not tool or not tool:IsA("Tool") then return nil end
+    if tool:GetAttribute("WeaponType") == "Gun" or tool:FindFirstChild("RemoteFunctionShoot") then
+        return "Gun"
+    end
+    local tip = (tool.ToolTip or ""):lower():gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+    if tip == "melee" then return "Melee"
+    elseif tip == "blox fruit" or tip == "fruit" then return "Fruit"
+    elseif tip == "sword" then return "Sword"
+    elseif tip == "gun" then return "Gun"
+    end
+    return nil
+end
+
+function IVORY_MACRO.getEquippedWeaponType()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("Tool") then
+            local t = IVORY_MACRO.toolToWeaponType(child)
+            if t then return t end
+        end
+    end
+    return nil
+end
+
+function IVORY_MACRO.findToolByType(weaponType)
+    local char = LocalPlayer.Character
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    local containers = {char, bp}
+    for _, c in ipairs(containers) do
+        if c then
+            for _, child in ipairs(c:GetChildren()) do
+                if child:IsA("Tool") and IVORY_MACRO.toolToWeaponType(child) == weaponType then
+                    return child
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function IVORY_MACRO.hotbarKeyForTool(tool)
+    if not tool then return nil end
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local bp = pg and pg:FindFirstChild("Backpack")
+    local hotbar = bp and bp:FindFirstChild("Hotbar")
+    local container = hotbar and hotbar:FindFirstChild("Container")
+    if not container then return nil end
+    local slot = nil
+    for _, d in ipairs(container:GetDescendants()) do
+        if d:IsA("GuiObject") and d:GetAttribute("ItemName") == tool.Name then
+            slot = math.floor(tonumber(d.LayoutOrder) or 0)
+            if slot > 0 then break end
+        end
+    end
+    local keys = {
+        [1] = Enum.KeyCode.One,   [2] = Enum.KeyCode.Two,
+        [3] = Enum.KeyCode.Three, [4] = Enum.KeyCode.Four,
+        [5] = Enum.KeyCode.Five,  [6] = Enum.KeyCode.Six,
+        [7] = Enum.KeyCode.Seven, [8] = Enum.KeyCode.Eight,
+        [9] = Enum.KeyCode.Nine,  [10] = Enum.KeyCode.Zero,
+    }
+    return keys[slot]
+end
+
+-- Main equip function. Returns true if the target weapon is equipped after call.
+function IVORY_MACRO.equipWeaponType(weaponType)
+    if not weaponType then return false end
+    local norm = tostring(weaponType):lower():gsub("%s+", "")
+    if norm == "bloxfruit" or norm == "fruit" then norm = "Fruit"
+    elseif norm == "melee" then norm = "Melee"
+    elseif norm == "sword" then norm = "Sword"
+    elseif norm == "gun" then norm = "Gun"
+    else norm = weaponType end
+
+    if IVORY_MACRO.getEquippedWeaponType() == norm then return true end
+
+    local tool = IVORY_MACRO.findToolByType(norm)
+    if not tool then return false end
+
+    -- Try hotbar key first (faster, game-native)
+    if not UIS.TouchEnabled then
+        local key = IVORY_MACRO.hotbarKeyForTool(tool)
+        if key then
+            pcall(function()
+                VIM:SendKeyEvent(true, key, false, game)
+                task.wait(0.02)
+                VIM:SendKeyEvent(false, key, false, game)
+            end)
+            local deadline = tick() + 0.2
+            repeat
+                if IVORY_MACRO.getEquippedWeaponType() == norm then return true end
+                task.wait(0.015)
+            until tick() >= deadline
+        end
+    end
+
+    -- Fallback: directly equip via Humanoid
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    if tool.Parent ~= char then
+        pcall(function() hum:EquipTool(tool) end)
+        local deadline = tick() + 0.25
+        while tick() < deadline do
+            if IVORY_MACRO.getEquippedWeaponType() == norm then return true end
+            task.wait(0.015)
+        end
+    end
+    return IVORY_MACRO.getEquippedWeaponType() == norm
+end
+
+-- =============================================
+-- COOLDOWN READER
+-- Looks at PlayerGui.Main.Skills.<ToolFolder>.<Key>.Cooldown.Size.X.Scale
+-- =============================================
+
+function IVORY_MACRO.smartCooldownWidth(guiObj)
+    if not (guiObj and guiObj.Parent) then return 0, "none" end
+    local size = guiObj.Size.X
+    if math.abs(size.Scale) > 0.002 then return math.abs(size.Scale), "scale" end
+    if math.abs(size.Offset) > 1      then return math.abs(size.Offset), "offset" end
+    return 0, "none"
+end
+
+function IVORY_MACRO.smartCooldownActive(guiObj)
+    return IVORY_MACRO.smartCooldownWidth(guiObj) > 0
+end
+
+-- Find the Cooldown frame for toolKey (Z/X/C/V/F) on the given tool.
+function IVORY_MACRO.findSmartCooldown(toolName, skillKey, forceRefresh)
+    local cacheKey = tostring(toolName or "") .. "\0" .. tostring(skillKey or "")
+    local cached = IVORY_MACRO.smartCooldownCache[cacheKey]
+    if not forceRefresh and cached and cached.Parent then return cached end
+
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local main = pg and pg:FindFirstChild("Main")
+    local skills = main and main:FindFirstChild("Skills")
+    if not skills then return nil, "skills HUD was not found" end
+
+    local toolFolder = skills:FindFirstChild(toolName or "")
+    if not toolFolder then
+        local norm = tostring(toolName or ""):lower():gsub("[^%w]", "")
+        for _, child in ipairs(skills:GetChildren()) do
+            local cNorm = child.Name:lower():gsub("[^%w]", "")
+            if cNorm == norm or cNorm == norm .. norm or norm == cNorm .. cNorm then
+                toolFolder = child
+                break
+            end
+        end
+    end
+    if not toolFolder then
+        return nil, "cooldown panel was not found for " .. tostring(toolName)
+    end
+
+    local keyFrame = toolFolder:FindFirstChild(tostring(skillKey or ""))
+    local cd = keyFrame and keyFrame:FindFirstChild("Cooldown")
+    if not (cd and cd:IsA("GuiObject")) then
+        return nil, "cooldown panel was not found for " .. tostring(toolName) .. " " .. tostring(skillKey)
+    end
+
+    IVORY_MACRO.smartCooldownCache[cacheKey] = cd
+    return cd
+end
+
+-- Wait for the skill HUD to be visibly ready (menu open, panel visible).
+function IVORY_MACRO.waitForSmartCooldownReady(toolName, skillKey, token, timeout)
+    local cacheKey = tostring(toolName or "") .. "\0" .. tostring(skillKey or "")
+    local deadline = tick() + math.max(0.3, tonumber(timeout) or 1.5)
+    local lastCd, stableAt, lastErr = nil, 0, "cooldown panel was not found"
+
+    while IVORY_MACRO.running and IVORY_MACRO.runToken == token and tick() < deadline do
+        local cd, err = IVORY_MACRO.findSmartCooldown(toolName, skillKey, true)
+        if cd then
+            local keyFrame = cd.Parent
+            local toolFolder = keyFrame and keyFrame.Parent
+            local visible = (not keyFrame:IsA("GuiObject") or keyFrame.Visible)
+                        and (not toolFolder:IsA("GuiObject") or toolFolder.Visible)
+            if visible then
+                if IVORY_MACRO.smartReadyCache[cacheKey] == cd then return cd, "" end
+                if lastCd ~= cd then
+                    lastCd, stableAt = cd, tick()
+                elseif tick() - stableAt >= 0.03 then
+                    IVORY_MACRO.smartReadyCache[cacheKey] = cd
+                    return cd, ""
+                end
+            else
+                lastCd, stableAt, lastErr = nil, 0, "skill HUD is still opening"
+            end
+        else
+            lastCd, stableAt, lastErr = nil, 0, err or lastErr
+        end
+        task.wait(0.015)
+    end
+    return nil, lastErr
+end
+
+-- Wait for a cast to begin (cooldown visibly climbs then ends).
+-- Returns: success, err, sawProgress
+function IVORY_MACRO.waitForSmartCooldown(cd, token, timeout, toolName, skillKey)
+    local deadline = tick() + math.max(0.25, tonumber(timeout) or 1.5)
+    local lastRefresh, sawProgress = 0, false
+    local lastWidth, lastKind, givingUpAt = 0, "none", 0
+
+    while IVORY_MACRO.running and IVORY_MACRO.runToken == token do
+        if tick() >= lastRefresh then
+            local refreshed = IVORY_MACRO.findSmartCooldown(toolName, skillKey, true)
+            if refreshed and refreshed ~= cd then
+                if sawProgress then
+                    lastWidth, lastKind = 0, "none"
+                end
+                cd = refreshed
+            end
+            lastRefresh = tick() + 0.05
+        end
+
+        local width, kind = IVORY_MACRO.smartCooldownWidth(cd)
+        if width > 0 then
+            if not sawProgress then
+                sawProgress = true
+                lastWidth, lastKind = width, kind
+                givingUpAt = tick() + 6
+            elseif kind ~= lastKind then
+                lastWidth, lastKind = width, kind
+            else
+                if width > lastWidth then lastWidth = width end
+                local thresh = (kind == "offset") and 1 or 0.003
+                if lastWidth - width > thresh then
+                    return true, "", true
+                end
+            end
+        elseif sawProgress and lastWidth > 0 then
+            return true, "", true
+        end
+
+        if not sawProgress and tick() >= deadline then
+            if not (cd and cd.Parent) then
+                return false, "cooldown HUD was replaced", false
+            end
+            return false, "cast was not acknowledged by the cooldown HUD", false
+        end
+        if sawProgress and givingUpAt and tick() >= givingUpAt then
+            return false, "cooldown HUD did not begin progressing", true
+        end
+        task.wait(0.015)
+    end
+    return false, "playback was stopped", sawProgress
+end
+
+-- Wait for a Fruit V transform to actually happen.
+function IVORY_MACRO.getFruitTransformationState(char)
+    if not char then return nil end
+    local util = ReplicatedStorage:FindFirstChild("Util")
+    local isTransformed = util and util:FindFirstChild("IsTransformed")
+    if isTransformed then
+        local ok, fn = pcall(require, isTransformed)
+        if ok and type(fn) == "function" then
+            local ok2, result = pcall(fn, char, false, false)
+            if ok2 then return result == true end
+        end
+    end
+    local attrs = {"Transformed", "Transformation", "IsTransformed", "FruitTransformed"}
+    for _, a in ipairs(attrs) do
+        if char:GetAttribute(a) == true then return true end
+    end
+    return nil
+end
+
+function IVORY_MACRO.waitForSmartTransformation(cd, token, toolName, timeout)
+    local firstDeadline = tick() + 1.5
+    local hardDeadline  = tick() + math.max(3, tonumber(timeout) or 5)
+    local refreshAt, sawProgress, settledAt = 0, false, 0
+
+    while IVORY_MACRO.running and IVORY_MACRO.runToken == token and tick() < hardDeadline do
+        if tick() >= refreshAt then
+            cd = IVORY_MACRO.findSmartCooldown(toolName, "V", true) or cd
+            refreshAt = tick() + 0.05
+        end
+        if IVORY_MACRO.smartCooldownWidth(cd) > 0 then sawProgress = true end
+
+        local char = LocalPlayer.Character
+        if IVORY_MACRO.getFruitTransformationState(char) == true then
+            local busy = char and char:FindFirstChild("Busy")
+            local stun = char and char:FindFirstChild("Stun")
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            local busyOn = busy and busy:IsA("BoolValue") and busy.Value == true
+            local stunOn = stun and stun:IsA("NumberValue") and stun.Value > 0
+            local toolOk = tool and IVORY_MACRO.toolToWeaponType(tool) == "Fruit" and tool.Enabled ~= false
+            if toolOk and not busyOn and not stunOn then
+                settledAt = (settledAt == 0) and tick() or settledAt
+                if tick() - settledAt >= 0.075 then
+                    return true, "", true
+                end
+            else
+                settledAt = 0
+            end
+            sawProgress = true
+        else
+            settledAt = 0
+        end
+
+        if not sawProgress and tick() >= firstDeadline then
+            return false, "transformation was not accepted", false
+        end
+        task.wait(0.015)
+    end
+    if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then
+        return false, "playback was stopped", sawProgress
+    end
+    return false, "transformation did not become ready", sawProgress
+end
+
+-- =============================================
+-- MOBILE SKILL DISPATCH
+-- Detects the mobile skill buttons (classic + modern) and sends touch events.
+-- =============================================
+
+IVORY_MACRO.mobile = IVORY_MACRO.mobile or {}
+IVORY_MACRO.mobile.active = {}   -- [key] = { id, position, ... } while pressed
+IVORY_MACRO.mobile.boundButtons = setmetatable({}, {__mode = "k"})
+IVORY_MACRO.mobile.boundSelectors = setmetatable({}, {__mode = "k"})
+IVORY_MACRO.mobile.held = setmetatable({}, {__mode = "k"})
+IVORY_MACRO.mobile.autoTouch = false
+IVORY_MACRO.mobile.skillKeys = {Z = true, X = true, C = true, V = true, F = true}
+
+function IVORY_MACRO.mobile.skillKeyFromName(name)
+    name = tostring(name or ""):upper():gsub("%s+", "")
+    if name == "Z" or name == "X" or name == "C" or name == "V" or name == "F" then
+        return name
+    end
+    local m = name:match("^SKILL[_%-]?([ZXCVF])$")
+    if m then return m end
+    return name:match("%[([ZXCVF])%]")
+end
+
+function IVORY_MACRO.mobile.isVisible(g)
+    if not g or not g.Parent or not g:IsA("GuiObject") or not g.Visible then return false end
+    if g.AbsoluteSize.X <= 0 or g.AbsoluteSize.Y <= 0 then return false end
+    local p = g.Parent
+    while p and p ~= LocalPlayer do
+        if p:IsA("GuiObject") and not p.Visible then return false end
+        if p:IsA("LayerCollector") and not p.Enabled then return false end
+        p = p.Parent
+    end
+    return true
+end
+
+function IVORY_MACRO.mobile.modernSkillMode(g)
+    local p = g
+    for _ = 1, 10 do
+        if not p then break end
+        if p.Name == "MobileContextButtons" then
+            local ok, ctrl = pcall(function()
+                return require(ReplicatedStorage.Controllers.UI.MobileUIController)
+            end)
+            if not ok or type(ctrl) ~= "table" then return 1 end
+            local ok2, mode = pcall(function() return ctrl:GetMobileSkillMode() end)
+            return ok2 and (tonumber(mode) or 1) or 1
+        end
+        p = p.Parent
+    end
+    return 0
+end
+
+function IVORY_MACRO.mobile.findContextButton(skillKey)
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil, nil, 0 end
+    local ctx = pg:FindFirstChild("MobileContextButtons", true)
+    local frame = ctx and ctx:FindFirstChild("ContextButtonFrame", true)
+    local wrapped = frame and (frame:FindFirstChild("Skill_" .. skillKey) or frame:FindFirstChild("Skill_" .. skillKey, true))
+    if not wrapped and ctx then wrapped = ctx:FindFirstChild("Skill_" .. skillKey, true) end
+    local btn = wrapped and wrapped:FindFirstChild("Button", true)
+    if not btn and wrapped then
+        for _, d in ipairs(wrapped:GetDescendants()) do
+            if d:IsA("GuiButton") and IVORY_MACRO.mobile.isVisible(d) then
+                btn = d
+                break
+            end
+        end
+    end
+    if not btn or not btn:IsA("GuiButton") or not IVORY_MACRO.mobile.isVisible(btn) then
+        return nil, nil, IVORY_MACRO.mobile.modernSkillMode(wrapped or btn or ctx)
+    end
+    return wrapped, btn, IVORY_MACRO.mobile.modernSkillMode(wrapped)
+end
+
+function IVORY_MACRO.mobile.findClassicSkillButton(tool, skillKey)
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local main = pg and pg:FindFirstChild("Main")
+    local skills = main and main:FindFirstChild("Skills")
+    if not skills then return nil end
+    local toolName = tool and tool.Name or ""
+    local toolFolder = skills:FindFirstChild(toolName)
+    local btn = toolFolder and toolFolder:FindFirstChild(skillKey)
+    if btn and btn:IsA("GuiButton") and IVORY_MACRO.mobile.isVisible(btn) then
+        return btn
+    end
+    return nil
+ bestend
+
+function IVORY_MACRO.mobile.findButtonAnywhere(skillKey)
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local best,Score = nil, 0
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("GuiButton") and IVORY_MACRO.mobile.isVisible(d) then
+            local name = d.Name:upper():gsub("%s+", "")
+            local ok = (name == skillKey) or (name == "SKILL_" .. skillKey) or
+                       (name == "BOUNDACTIONSKILL" .. skillKey)
+            if ok then
+                local score = 10
+                if name == skillKey then score = 30
+                elseif name:find(skillKey, 1, true) then score = 20 end
+                if score > bestScore then best = d; bestScore = score end
+            end
+        end
+    end
+    return best
+end
+
+-- Send a Begin or End touch event
+function IVORY_MACRO.mobile.sendTouch(isBegin, touchId, pos)
+    IVORY_MACRO.mobile.autoTouch = true
+    local ok = pcall(function()
+        VIM:SendTouchEvent(touchId,
+            (isBegin and Enum.UserInputState.Begin or Enum.UserInputState.End).Value,
+            math.floor(pos.X), math.floor(pos.Y))
+    end)
+    IVORY_MACRO.mobile.autoTouch = false
+    return ok
+end
+
+-- Press a skill on mobile. isBegin=true begins the press, false ends it.
+-- Returns true if the input was delivered.
+function IVORY_MACRO.mobile.sendMobileSkill(skillKey, isBegin, _, _)
+    skillKey = tostring(skillKey or ""):upper()
+    if skillKey == "R" then return false end
+    if not IVORY_MACRO.mobile.skillKeys[skillKey] then return false end
+
+    if isBegin then
+        -- Try context button (modern mobile) first
+        local wrapped, btn, mode = IVORY_MACRO.mobile.findContextButton(skillKey)
+        if wrapped and btn then
+            local pos = btn.AbsolutePosition + btn.AbsoluteSize * 0.5
+            local tid = 320 + string.byte(skillKey)
+            IVORY_MACRO.mobile.active[skillKey] = {id = tid, position = pos, mode = mode}
+            return IVORY_MACRO.mobile.sendTouch(true, tid, pos)
+        end
+        -- Classic mobile
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        local classic = IVORY_MACRO.mobile.findClassicSkillButton(tool, skillKey)
+        if classic then
+            local pos = classic.AbsolutePosition + classic.AbsoluteSize * 0.5
+            local tid = 300 + string.byte(skillKey)
+            IVORY_MACRO.mobile.active[skillKey] = {id = tid, position = pos, mode = 0}
+            return IVORY_MACRO.mobile.sendTouch(true, tid, pos)
+        end
+        -- Anywhere fallback
+        local any = IVORY_MACRO.mobile.findButtonAnywhere(skillKey)
+        if any then
+            local pos = any.AbsolutePosition + any.AbsoluteSize * 0.5
+            local tid = 340 + string.byte(skillKey)
+            IVORY_MACRO.mobile.active[skillKey] = {id = tid, position = pos, mode = 0}
+            return IVORY_MACRO.mobile.sendTouch(true, tid, pos)
+        end
+        return false
+    else
+        local info = IVORY_MACRO.mobile.active[skillKey]
+        if not info then return false end
+        IVORY_MACRO.mobile.active[skillKey] = nil
+        return IVORY_MACRO.mobile.sendTouch(false, info.id, info.position)
+    end
+end
+
+-- Release everything (on stop / unload)
+function IVORY_MACRO.mobile.releaseAll()
+    for key, info in pairs(IVORY_MACRO.mobile.active) do
+        IVORY_MACRO.mobile.sendTouch(false, info.id, info.position)
+    end
+    IVORY_MACRO.mobile.active = {}
+end
+
+function IVORY_MACRO.mobile.isHolding(skillKey)
+    return IVORY_MACRO.mobile.active[skillKey] ~= nil
+end
+
+print("[IvoryHub] Smart Macro Part 2 loaded - equip + cooldown + mobile ready")
+    -- =============================================
+-- IVORY HUB — SMART MACRO
+-- PART 3 / 5 : CASTING CORE + RUN LOOP
+-- =============================================
+
+-- Small helpers
+function IVORY_MACRO.waitWhileRunning(seconds, token)
+    local deadline = tick() + math.max(0, tonumber(seconds) or 0)
+    while IVORY_MACRO.running and IVORY_MACRO.runToken == token and tick() < deadline do
+        task.wait(math.min(0.015, math.max(0, deadline - tick())))
+    end
+    return IVORY_MACRO.running and IVORY_MACRO.runToken == token
+end
+
+function IVORY_MACRO.isCooldownGuiEmpty(g)
+    if not g then return false end
+    local ok, val = pcall(function() return g.Value end)
+    if ok then
+        if val == true then return true end
+        if (tonumber(val) or 0) > 0 then return true end
+    end
+    return false
+end
+
+-- Keyboard press helper for skill casts
+function IVORY_MACRO.pressSkillKey(keyCode, holdSeconds)
+    holdSeconds = math.clamp(tonumber(holdSeconds) or 0.045, 0.01, 10)
+    local ok = pcall(function()
+        VIM:SendKeyEvent(true, keyCode, false, game)
+    end)
+    if not ok then return false end
+    task.wait(holdSeconds)
+    pcall(function()
+        VIM:SendKeyEvent(false, keyCode, false, game)
+    end)
+    return true
+end
+
+-- =============================================
+-- CAST A SINGLE SMART STEP
+-- step = { mode = "Tap"|"Hold", hold = "0.2", fallback fields, ... }
+-- =============================================
+function IVORY_MACRO.castSmartStep(step, skillKey, keyCode, token)
+    if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then
+        return false, "playback stopped"
+    end
+    local mode = (step.mode == "Hold") and "Hold" or "Tap"
+    local holdTime = (mode == "Hold") and (math.clamp(tonumber(step.hold) or 0, 0, 10)) or 0.045
+    if mode == "Hold" and holdTime == 0 then holdTime = 0.045 end
+
+    local delivered = false
+    local path = "key"
+
+    if UIS.TouchEnabled and IVORY_MACRO.mobile and IVORY_MACRO.mobile.sendMobileSkill then
+        local ok, result = pcall(IVORY_MACRO.mobile.sendMobileSkill, skillKey, true, nil, nil, IVORY_MACRO.runContext)
+        delivered = ok and result == true
+        if delivered then path = "ability" end
+    end
+
+    if not delivered and keyCode then
+        IVORY_MACRO.activeKey = keyCode
+        IVORY_MACRO.activeSkill = skillKey
+        IVORY_MACRO.activeKeyToken = token
+        IVORY_MACRO.activeInputMode = "key"
+        if _G.__CokeboysMarkSyntheticKey then
+            pcall(_G.__CokeboysMarkSyntheticKey, keyCode)
+        end
+        delivered = IVORY_MACRO.pressSkillKey(keyCode, holdTime)
+        if delivered then
+            IVORY_MACRO.lastSkillDeliveryPath = "pc-key"
+        end
+    end
+
+    if not delivered then
+        return false, "ability input unavailable [" .. tostring(skillKey) .. "]"
+    end
+
+    IVORY_MACRO.activeKey = keyCode
+    IVORY_MACRO.activeSkill = skillKey
+    IVORY_MACRO.activeKeyToken = token
+    IVORY_MACRO.activeInputMode = path
+
+    return true, ""
+end
+
+-- Release active key/skill if still held
+function IVORY_MACRO.releaseActiveInput(token)
+    if IVORY_MACRO.activeKey and (not token or IVORY_MACRO.activeKeyToken == token) then
+        if IVORY_MACRO.activeInputMode == "ability" and IVORY_MACRO.mobile and IVORY_MACRO.mobile.sendMobileSkill then
+            pcall(IVORY_MACRO.mobile.sendMobileSkill, IVORY_MACRO.activeSkill, false, nil, nil, IVORY_MACRO.runContext)
+        elseif IVORY_MACRO.activeKey then
+            if _G.__CokeboysMarkSyntheticKey then
+                pcall(_G.__CokeboysMarkSyntheticKey, IVORY_MACRO.activeKey)
+            end
+            pcall(function()
+                VIM:SendKeyEvent(false, IVORY_MACRO.activeKey, false, game)
+            end)
+        end
+        IVORY_MACRO.activeKey = nil
+        IVORY_MACRO.activeSkill = nil
+        IVORY_MACRO.activeKeyToken = nil
+        IVORY_MACRO.activeInputMode = nil
+    end
+end
+
+-- =============================================
+-- M1 STEP  (native normal attacks)
+-- =============================================
+function IVORY_MACRO.resolveFruitM1Profile(tool)
+    if not tool or not tool:IsA("Tool") then
+        return nil, "equipped Fruit tool was not found"
+    end
+    -- Trust the tool if it's a Fruit
+    return {name = tool.Name}, nil
+end
+
+function IVORY_MACRO.runM1Step(token, weaponType, weaponKey, count)
+    if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then
+        return false
+    end
+    count = math.clamp(math.floor(tonumber(count) or 1), 1, 6)
+    weaponType = IVORY_MACRO.normalizeWeapon(weaponType)
+    if not ({Melee = true, Fruit = true, Sword = true, Gun = true})[weaponType] then
+        error("M1 action has an invalid weapon")
+    end
+
+    local ok = (IVORY_MACRO.getEquippedWeaponType() == weaponType) or IVORY_MACRO.equipWeaponType(weaponType)
+    if not ok then
+        error("M1 action could not equip " .. weaponType)
+    end
+    if not IVORY_MACRO.waitWhileRunning(0.06, token) then return false end
+
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool or IVORY_MACRO.getEquippedWeaponType() ~= weaponType then
+        error("M1 action could not find the equipped " .. weaponType .. " tool")
+    end
+
+    for i = 1, count do
+        if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then break end
+        if tool.Parent ~= char or IVORY_MACRO.getEquippedWeaponType() ~= weaponType then
+            error("M1 action lost the equipped tool before attack " .. i)
+        end
+
+        local accepted = false
+        local deadline = tick() + 3
+
+        while IVORY_MACRO.running and IVORY_MACRO.runToken == token and tick() < deadline and not accepted do
+            local busy = char:FindFirstChild("Busy")
+            local stun = char:FindFirstChild("Stun")
+            local busyOn = busy and busy:IsA("BoolValue") and busy.Value
+            local stunOn = stun and stun:IsA("NumberValue") and stun.Value > 0
+            if not (tool.Parent == char and tool.Enabled ~= false and not busyOn and not stunOn) then
+                if not IVORY_MACRO.waitWhileRunning(0.035, token) then break end
+            else
+                -- Fire the attack
+                if UIS.TouchEnabled and IVORY_MACRO.mobile and IVORY_MACRO.mobile.sendMobileSkill then
+                    -- Fall back to keyboard for M1 even on mobile for reliability
+                end
+                local mouse = LocalPlayer:GetMouse()
+                pcall(function()
+                    VIM:SendMouseButtonEvent(mouse.X, mouse.Y, 0, true, game, 0)
+                end)
+                task.wait(0.05)
+                pcall(function()
+                    VIM:SendMouseButtonEvent(mouse.X, mouse.Y, 0, false, game, 0)
+                end)
+                task.wait(0.045)
+                -- Confirm via tool.Enabled flicker or Holding boolean
+                local holding = tool:FindFirstChild("Holding")
+                local enabledFlicker = not tool.Enabled
+                accepted = enabledFlicker or (holding and holding:IsA("BoolValue") and holding.Value)
+                if not accepted then
+                    task.wait(0.055)
+                end
+            end
+        end
+
+        if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then break end
+        if not accepted then
+            error("M1 attack " .. i .. " of " .. count .. " was not accepted by " .. weaponType)
+        end
+        if i < count then
+            local gap = (weaponType == "Fruit") and 0.055 or 0.055
+            if not IVORY_MACRO.waitWhileRunning(gap, token) then break end
+        end
+    end
+
+    return IVORY_MACRO.running and IVORY_MACRO.runToken == token
+end
+
+-- =============================================
+-- SORU STEP  (dash toward target)
+-- =============================================
+function IVORY_MACRO.runSoruStep(token, _)
+    if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then return false end
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local prev = char:GetAttribute("LastSoru")
+
+    local sent = false
+    pcall(function()
+        if IVORY_MACRO.silentFireSoru then
+            sent = true
+            return
+        end
+        VIM:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+        task.wait(0.04)
+        VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+        sent = true
+    end)
+    if not sent then return true end
+
+    local deadline = tick() + (UIS.TouchEnabled and 0.55 or 0.4)
+    while IVORY_MACRO.running and IVORY_MACRO.runToken == token and tick() < deadline do
+        if char and char:GetAttribute("LastSoru") ~= prev then
+            return IVORY_MACRO.waitWhileRunning(math.clamp(tonumber((IVORY_MACRO.Features and IVORY_MACRO.Features.SoruSkillDelay) or 0.1), 0.05, 5), token)
+        end
+        task.wait(0.015)
+    end
+    return IVORY_MACRO.running and IVORY_MACRO.runToken == token
+end
+
+-- =============================================
+-- RACE V3 STEP
+-- =============================================
+function IVORY_MACRO.runV3Step(token, _)
+    if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then return false end
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local commE = remotes and remotes:FindFirstChild("CommE")
+    if commE then
+        pcall(function() commE:FireServer("ActivateAbility") end)
+    end
+    return IVORY_MACRO.waitWhileRunning(0.05, token)
+end
+
+-- =============================================
+-- POST-SKILL JUMPS
+-- =============================================
+function IVORY_MACRO.runPostSkillJumps(count, token)
+    count = math.clamp(math.floor(tonumber(count) or 0), 0, 8)
+    for _ = 1, count do
+        if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then
+            return false, "playback was stopped"
+        end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hum or not hrp or hum.Health <= 0 or hum.Sit or hum.SeatPart or hrp.Anchored then
+            return false, "cannot jump in the current character state"
+        end
+        -- Prefer Ivory's existing air-jump helper
+        if type(_G.__CokeboysAirJump) == "function" then
+            pcall(_G.__CokeboysAirJump)
+        else
+            local jp = hum.UseJumpPower and hum.JumpPower or math.sqrt(2 * workspace.Gravity * hum.JumpHeight)
+            local v = hrp.AssemblyLinearVelocity
+            hrp.AssemblyLinearVelocity = Vector3.new(v.X, math.max(v.Y, jp), v.Z)
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+        if not IVORY_MACRO.waitWhileRunning(0.12, token) then
+            return false, "playback was stopped"
+        end
+    end
+    return true, ""
+end
+
+-- =============================================
+-- RESOLVE STEP  (primary vs. fallback based on cooldown)
+-- =============================================
+function IVORY_MACRO.skillCooldownState(tool, key)
+    if not tool or not key then return false, false end
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local main = pg and pg:FindFirstChild("Main")
+    local skills = main and main:FindFirstChild("Skills")
+    if not skills then return false, false end
+    local folder = skills:FindFirstChild(tool.Name)
+    if not folder then
+        local norm = tostring(tool.Name):lower():gsub("[%s%-_]", "")
+        for _, c in ipairs(skills:GetChildren()) do
+            local n = c.Name:lower():gsub("[%s%-_]", "")
+            if n == norm or n == norm .. norm or norm == n .. n then
+                folder = c
+                break
+            end
+        end
+    end
+    local keyFrame = folder and folder:FindFirstChild(key)
+    local cd = keyFrame and keyFrame:FindFirstChild("Cooldown")
+    if not cd then return false, false end
+    local width = cd.Size.X.Scale
+    return true, (cd.Visible and width > 0.05)
+end
+
+function IVORY_MACRO.resolveSmartStep(step)
+    local char = LocalPlayer.Character
+    if not char then return nil, "character is temporarily unavailable" end
+    local resolved = {
+        weapon = IVORY_MACRO.normalizeWeapon(step.weapon),
+        skill = IVORY_MACRO.normalizeSkill(step.skill),
+        mode = IVORY_MACRO.normalizeCastMode(step.mode, step.hold),
+        hold = step.hold,
+        usedFallback = false,
+    }
+
+    if resolved.mode == "Transform" and IVORY_MACRO.getFruitTransformationState(char) == true then
+        return resolved
+    end
+    if step.fallbackEnabled ~= true then return resolved end
+
+    local tool = char:FindFirstChildOfClass("Tool")
+    local exists, onCd = IVORY_MACRO.skillCooldownState(tool, resolved.skill)
+    if not (exists and onCd) then return resolved end
+
+    local fbWeapon = IVORY_MACRO.normalizeWeapon(step.fallbackWeapon or resolved.weapon)
+    local fbSkill = IVORY_MACRO.normalizeSkill(step.fallbackSkill or "X")
+    if fbWeapon ~= "None" then
+        if not IVORY_MACRO.equipWeaponType(fbWeapon) then
+            return nil, "could not equip fallback " .. tostring(fbWeapon)
+        end
+    end
+    tool = char:FindFirstChildOfClass("Tool")
+    exists, onCd = IVORY_MACRO.skillCooldownState(tool, fbSkill)
+    if exists and onCd then
+        return nil, "primary and fallback are cooling down"
+    end
+    return {
+        weapon = fbWeapon,
+        skill = fbSkill,
+        mode = IVORY_MACRO.normalizeCastMode(step.fallbackMode, step.fallbackHold),
+        hold = step.fallbackHold,
+        usedFallback = true,
+    }
+end
+
+-- =============================================
+-- MAIN RUN LOOP
+-- =============================================
+function IVORY_MACRO.runSlot(context)
+    if not context or type(context.snapshot) ~= "table" then return end
+    local snap = context.snapshot
+    local token = context.id
+
+    IVORY_MACRO.running = true
+    IVORY_MACRO.runContext = context
+    context.state = "RUNNING"
+
+    local skillKeyToCode = {
+        Z = Enum.KeyCode.Z, X = Enum.KeyCode.X, C = Enum.KeyCode.C,
+        V = Enum.KeyCode.V, F = Enum.KeyCode.F,
+    }
+
+    task.spawn(function()
+        IVORY_MACRO.contextByThread[coroutine.running()] = context
+        local ok, err = pcall(function()
+            local soruEnabled = snap.soruEnabled == true
+            local soruAfter   = IVORY_MACRO.clampInt(snap.soruAfter, 0, IVORY_MACRO.BLOCK_COUNT, 1)
+            local m1Enabled   = snap.m1Enabled == true
+            local m1After     = IVORY_MACRO.clampInt(snap.m1After, 0, IVORY_MACRO.BLOCK_COUNT, 1)
+            local m1Weapon    = IVORY_MACRO.normalizeWeapon(snap.m1Weapon)
+            local m1Count     = IVORY_MACRO.clampInt(snap.m1Count, 1, 6, 1)
+            local v3Enabled   = snap.v3Enabled == true
+            local v3After     = IVORY_MACRO.clampInt(snap.v3After, 0, IVORY_MACRO.BLOCK_COUNT, 1)
+
+            for i, step in ipairs(snap.steps) do
+                if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then break end
+                IVORY_MACRO.currentBlockIndex = i
+
+                if soruEnabled and soruAfter == i - 1 then
+                    IVORY_MACRO.runSoruStep(token, soruAfter)
+                end
+                if m1Enabled and m1After == i - 1 then
+                    IVORY_MACRO.runM1Step(token, m1Weapon, nil, m1Count)
+                end
+                if v3Enabled and v3After == i - 1 then
+                    IVORY_MACRO.runV3Step(token, v3After)
+                end
+
+                if step.enabled ~= false then
+                    local resolved, rerr = IVORY_MACRO.resolveSmartStep(step)
+                    if resolved then
+                        local weapon = resolved.weapon
+                        local skill = resolved.skill
+                        if weapon ~= "None" then
+                            if not IVORY_MACRO.equipWeaponType(weapon) then
+                                error("Block " .. i .. " could not equip " .. weapon)
+                            end
+                        end
+                        if not IVORY_MACRO.running or IVORY_MACRO.runToken ~= token then break end
+
+                        if skill ~= "" then
+                            local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+                            local toolName = tool and tool.Name or ""
+                            local cd, cdErr = IVORY_MACRO.waitForSmartCooldownReady(toolName, skill, token, 1.5)
+                            if not cd then
+                                error("Block " .. i .. " " .. tostring(cdErr))
+                            end
+                            local readyObj = IVORY_MACRO.waitForSmartCooldownReady(toolName, skill, token, 1.5)
+                            if readyObj and IVORY_MACRO.smartCooldownActive(readyObj) then
+                                -- on cooldown: try again next cycle
+                            else
+                                local code = skillKeyToCode[skill]
+                                local delivered, derr = IVORY_MACRO.castSmartStep(resolved, skill, code, token)
+                                if not delivered then
+                                    error("Block " .. i .. " " .. tostring(derr))
+                                end
+                                local ok2, err2 = IVORY_MACRO.waitForSmartCooldown(cd, token, 1.5, toolName, skill)
+                                if not ok2 then
+                                    -- one retry
+                                    if not IVORY_MACRO.waitWhileRunning(0.035, token) then break end
+                                    local d2 = IVORY_MACRO.castSmartStep(resolved, skill, code, token)
+                                    if d2 then
+                                        IVORY_MACRO.waitForSmartCooldown(cd, token, 1.5, toolName, skill)
+                                    end
+                                end
+                            end
+                            IVORY_MACRO.runPostSkillJumps(step.jumpsAfter, token)
+                        end
+                    elseif rerr then
+                        -- skip block quietly (cooldown / not ready)
+                    end
+                end
+            end
+
+            -- final soru / M1 / V3 if placed at end
+            if IVORY_MACRO.running and IVORY_MACRO.runToken == token then
+                if soruEnabled and soruAfter == IVORY_MACRO.BLOCK_COUNT then
+                    IVORY_MACRO.runSoruStep(token, soruAfter)
+                end
+                if m1Enabled and m1After == IVORY_MACRO.BLOCK_COUNT then
+                    IVORY_MACRO.runM1Step(token, m1Weapon, nil, m1Count)
+                end
+                if v3Enabled and v3After == IVORY_MACRO.BLOCK_COUNT then
+                    IVORY_MACRO.runV3Step(token, v3After)
+                end
+            end
+        end)
+
+        IVORY_MACRO.currentBlockIndex = nil
+        context.done = true
+        if IVORY_MACRO.runToken == token then
+            IVORY_MACRO.stopRun(ok and "complete" or "error", true, context)
+            if not ok then
+                warn("[IvoryHub] Smart Macro playback stopped: " .. tostring(err))
+                if type(notify) == "function" then
+                    notify("Smart Macro", "Playback stopped: " .. tostring(err), 2)
+                end
+            end
+        end
+        IVORY_MACRO.contextByThread[coroutine.running()] = nil
+        if IVORY_MACRO.refreshLaunchUI then IVORY_MACRO.refreshLaunchUI() end
+    end)
+end
+
+-- =============================================
+-- STOP / REQUEST
+-- =============================================
+function IVORY_MACRO.stopRun(reason, alreadyCancelled, target)
+    local ctx = IVORY_MACRO.runContext
+    if target and ctx ~= target then return true end
+    if not ctx then
+        IVORY_MACRO.pendingRun = nil
+        return true
+    end
+    if ctx.cleaning then return true end
+    ctx.cleaning = true
+    ctx.cancelled = true
+    ctx.state = "STOPPING"
+    IVORY_MACRO.runToken = (IVORY_MACRO.runToken or 0) + 1
+    IVORY_MACRO.releaseActiveInput(ctx.id)
+    if IVORY_MACRO.mobile and IVORY_MACRO.mobile.releaseAll then
+        pcall(IVORY_MACRO.mobile.releaseAll)
+    end
+    for _, conn in ipairs(ctx.connections or {}) do
+        pcall(function() conn:Disconnect() end)
+    end
+    ctx.cleaning = false
+    IVORY_MACRO.runContext = nil
+    IVORY_MACRO.running = false
+    IVORY_MACRO.currentBlockIndex = nil
+    if IVORY_MACRO.refreshLaunchUI then IVORY_MACRO.refreshLaunchUI() end
+    return true
+end
+
+function IVORY_MACRO.requestRun(slotIndex, source)
+    slotIndex = tonumber(slotIndex)
+    if not slotIndex or slotIndex % 1 ~= 0 or slotIndex < 1 or slotIndex > IVORY_MACRO.SLOT_COUNT then
+        return false
+    end
+    if IVORY_MACRO.runContext and IVORY_MACRO.runContext.slotIndex == slotIndex then
+        IVORY_MACRO.stopRun("toggle off", false, IVORY_MACRO.runContext)
+        return true
+    end
+    local snap = IVORY_MACRO.slots[slotIndex]
+    if not snap then return false end
+
+    IVORY_MACRO.pendingRun = {
+        slotIndex = slotIndex,
+        snapshot = snap,
+        capturedName = tostring(snap.name or ("Slot " .. slotIndex)),
+        triggerSource = source or "manual",
+        startedAt = tick(),
+        connections = {},
+    }
+    IVORY_MACRO.intentVersion = (IVORY_MACRO.intentVersion or 0) + 1
+    IVORY_MACRO.pendingRun.intentVersion = IVORY_MACRO.intentVersion
+
+    -- Stop any current run then start
+    if IVORY_MACRO.runContext then
+        IVORY_MACRO.stopRun("replacement", false, IVORY_MACRO.runContext)
+    end
+    IVORY_MACRO.runToken = (IVORY_MACRO.runToken or 0) + 1
+    local ctx = IVORY_MACRO.pendingRun
+    ctx.id = IVORY_MACRO.runToken
+    IVORY_MACRO.pendingRun = nil
+    IVORY_MACRO.runSlot(ctx)
+    return true
+end
+
+IVORY_MACRO.runningSlot = nil
+
+print("[IvoryHub] Smart Macro Part 3 loaded - casting core ready")
